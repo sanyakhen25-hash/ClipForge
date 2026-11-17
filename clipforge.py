@@ -21,22 +21,42 @@ def run(cmd, **kw):
 
 
 def download(url, out, minutes, from_start):
+    import time
+    from yt_dlp import YoutubeDL
     for f in glob.glob(os.path.join(out, "source.*")):
         os.remove(f)
-    from yt_dlp import YoutubeDL
-    opts = {"noplaylist": True, "format": "bv*[height<=720]+ba/b[height<=720]", "merge_output_format": "mp4",
-            "outtmpl": os.path.join(out, "source.%(ext)s"), "live_from_start": from_start}
-    if minutes:
-        opts.update(external_downloader="ffmpeg", external_downloader_args={"ffmpeg": ["-t", str(minutes * 60)]})
+    with YoutubeDL({"noplaylist": True, "quiet": True}) as y:
+        live = bool(y.extract_info(url, download=False).get("is_live"))
+    t0 = time.time()
+
+    class Stop(Exception):
+        pass
+
+    def hook(d):
+        if live and minutes and time.time() - t0 > minutes * 60:
+            raise Stop()
+
+    opts = {"noplaylist": True, "merge_output_format": "mp4", "outtmpl": os.path.join(out, "source.%(ext)s"),
+            "format": "b[height<=720]/best" if live else "bv*[height<=720]+ba/b[height<=720]",
+            "live_from_start": from_start, "hls_prefer_native": True, "progress_hooks": [hook],
+            "retries": 10, "fragment_retries": 10}
     print("Recording from the link (a live stream records for", minutes or "all", "minutes)...")
     try:
         YoutubeDL(opts).download([url])
+    except Stop:
+        print("Reached the time limit. Saving what was recorded...")
     except Exception as e:
         sys.exit(f"Download failed: {e}")
-    found = glob.glob(os.path.join(out, "source.*"))
-    if not found:
-        sys.exit("Nothing was downloaded. Check the link and that ffmpeg is installed.")
-    return found[0]
+    done = [f for f in glob.glob(os.path.join(out, "source.*")) if not f.endswith((".part", ".ytdl"))]
+    if not done:
+        parts = glob.glob(os.path.join(out, "source.*.part"))
+        if parts:
+            dst = os.path.join(out, "source.mp4")
+            run(["ffmpeg", "-y", "-v", "error", "-i", parts[0], "-c", "copy", dst])
+            done = [dst]
+    if not done:
+        sys.exit("Nothing was downloaded. Check the link and your internet connection.")
+    return done[0]
 
 
 def find_moments(src, n, gap=25, hop=0.25):
